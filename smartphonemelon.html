@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>メロンソーダ・タワー</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<style>
+  * {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    margin: 0;
+    padding: 10px;
+    background: #eef9f2;
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    user-select: none;
+    -webkit-user-select: none;
+    overflow-x: hidden;
+    touch-action: pan-y;
+  }
+  #ui {
+    margin-top: 5px;
+    display: flex;
+    gap: 20px;
+    font-size: 1.1rem;
+    font-weight: bold;
+    color: #1b4332;
+  }
+  #hint-text {
+    font-size: 0.8rem;
+    color: #52796f;
+    margin-top: 4px;
+  }
+  #items-palette {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin: 10px 0;
+    max-width: 450px;
+  }
+  .item-btn {
+    padding: 10px 14px;
+    border: none;
+    border-radius: 20px;
+    font-weight: bold;
+    cursor: pointer;
+    font-size: 0.9rem;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    touch-action: none;
+    transition: transform 0.1s, outline 0.1s;
+  }
+  .item-btn:active {
+    transform: scale(0.95);
+  }
+  .item-btn.selected {
+    outline: 3px solid #1b4332;
+    transform: scale(1.05);
+  }
+
+  .btn-soda { background: #52b788; color: white; }
+  .btn-ice { background: #caf0f8; color: #0077b6; border: 1px solid #90e0ef; }
+  .btn-icecream { background: #fff3b0; color: #7f5539; }
+  .btn-cherry { background: #e63946; color: white; }
+  
+  /* レスポンシブ縮小用のラッパー */
+  #scale-wrapper {
+    width: 450px;
+    height: 600px;
+    transform-origin: top center;
+  }
+
+  #canvas-container {
+    position: relative;
+    width: 450px;
+    height: 600px;
+    border: 3px solid #74c69d;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 8px 16px rgba(0,0,0,0.08);
+    overflow: hidden;
+    touch-action: none;
+  }
+
+  canvas {
+    display: block;
+    position: relative;
+    z-index: 2;
+  }
+
+  #liquid-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 1;
+    pointer-events: none;
+    opacity: 0.55;
+    filter: blur(8px) contrast(20);
+  }
+
+  #game-over-modal {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(255, 255, 255, 0.95);
+    padding: 24px 32px;
+    border-radius: 16px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+    text-align: center;
+    display: none;
+    z-index: 10;
+    width: 80%;
+    max-width: 320px;
+  }
+  #restart-btn {
+    margin-top: 15px;
+    padding: 10px 24px;
+    font-size: 1rem;
+    font-weight: bold;
+    background: #2d6a4f;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div>スコア: <span id="score">0</span></div>
+  <div>こぼれた数: <span id="spill-count">0</span> / 3</div>
+</div>
+<div id="hint-text">具材を選んでグラスをタップするか、直接ドラッグして投入！</div>
+
+<div id="items-palette">
+  <button class="item-btn btn-soda" draggable="true" data-type="soda">🍈 ソーダ液</button>
+  <button class="item-btn btn-ice" draggable="true" data-type="ice">🧊 四角氷</button>
+  <button class="item-btn btn-icecream" draggable="true" data-type="icecream">🍨 バニラアイス</button>
+  <button class="item-btn btn-cherry" draggable="true" data-type="cherry">🍒 チェリー</button>
+</div>
+
+<div id="scale-wrapper">
+  <div id="canvas-container">
+    <canvas id="liquid-canvas" width="450" height="600"></canvas>
+    <div id="game-over-modal">
+      <h2 style="color: #d90429; margin-top: 0;">こぼれすぎました！</h2>
+      <p>最終スコア: <span id="final-score">0</span> pt</p>
+      <button id="restart-btn" onclick="resetGame()">もう一度つくる</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const { Engine, Render, Runner, Bodies, Composite, Events } = Matter;
+
+const BASE_WIDTH = 450;
+const BASE_HEIGHT = 600;
+let engine, render, runner;
+let score = 0;
+let spills = 0;
+const MAX_SPILLS = 3;
+let isGameOver = false;
+
+const sodaParticles = [];
+let liquidCtx;
+
+let selectedType = 'soda'; // スマホ向けにデフォルト選択
+
+const ITEM_CONFIG = {
+  soda:     { score: 10,  color: '#2ec4b6' },
+  ice:      { score: 25,  color: '#caf0f8' },
+  icecream: { score: 50,  color: '#fff3b0' },
+  cherry:   { score: 100, color: '#e63946' }
+};
+
+// 画面幅に合わせてキャンバスをレスポンシブ縮小
+function adjustScale() {
+  const wrapper = document.getElementById('scale-wrapper');
+  const availableWidth = window.innerWidth - 20;
+  let scale = 1;
+  if (availableWidth < BASE_WIDTH) {
+    scale = availableWidth / BASE_WIDTH;
+  }
+  wrapper.style.transform = `scale(${scale})`;
+  wrapper.style.height = `${BASE_HEIGHT * scale}px`;
+}
+
+window.addEventListener('resize', adjustScale);
+
+function initPhysics() {
+  adjustScale();
+
+  const container = document.getElementById('canvas-container');
+  const lCanvas = document.getElementById('liquid-canvas');
+  liquidCtx = lCanvas.getContext('2d');
+
+  engine = Engine.create({
+    positionIterations: 8,
+    velocityIterations: 8
+  });
+
+  render = Render.create({
+    element: container,
+    engine: engine,
+    options: {
+      width: BASE_WIDTH,
+      height: BASE_HEIGHT,
+      wireframes: false,
+      background: 'transparent'
+    }
+  });
+
+  Render.run(render);
+  runner = Runner.create();
+  Runner.run(runner, engine);
+
+  createCurvedGlass();
+  setupCollisionCheck();
+  setupLiquidRendering();
+  updatePaletteSelection();
+}
+
+function createCurvedGlass() {
+  const glassStyle = { fillStyle: 'rgba(116, 198, 157, 0.45)' };
+  const glassParts = [];
+
+  const cx = BASE_WIDTH / 2;
+  const bottomY = BASE_HEIGHT - 55;
+  const bottomW = 120;
+
+  const bottom = Bodies.rectangle(cx, bottomY, bottomW, 16, {
+    isStatic: true,
+    render: glassStyle
+  });
+  glassParts.push(bottom);
+
+  const segments = 12;
+  for (let side = -1; side <= 1; side += 2) {
+    let prevX = cx + side * (bottomW / 2);
+    let prevY = bottomY - 8;
+
+    for (let i = 1; i <= segments; i++) {
+      const t = i / segments;
+      const curX = cx + side * (bottomW / 2 + 10 + 65 * Math.pow(t, 1.6));
+      const curY = (bottomY - 8) - 275 * t;
+
+      const midX = (prevX + curX) / 2;
+      const midY = (prevY + curY) / 2;
+      const segLength = Math.hypot(curX - prevX, curY - prevY) + 2;
+      const angle = Math.atan2(curY - prevY, curX - prevX);
+
+      const segment = Bodies.rectangle(midX, midY, segLength, 12, {
+        isStatic: true,
+        angle: angle,
+        render: glassStyle
+      });
+      glassParts.push(segment);
+
+      if (i === segments) {
+        const rim = Bodies.circle(curX, curY, 6, {
+          isStatic: true,
+          render: glassStyle
+        });
+        glassParts.push(rim);
+      }
+
+      prevX = curX;
+      prevY = curY;
+    }
+  }
+
+  const floor = Bodies.rectangle(cx, BASE_HEIGHT + 50, BASE_WIDTH * 2, 40, {
+    isStatic: true,
+    isSensor: true,
+    label: 'floor'
+  });
+  glassParts.push(floor);
+
+  Composite.add(engine.world, glassParts);
+}
+
+function spawnItem(type, x, y) {
+  if (isGameOver) return;
+
+  const config = ITEM_CONFIG[type];
+  if (!config) return;
+
+  // 画面枠外に飛び出さないようクランプ
+  const spawnX = Math.max(30, Math.min(BASE_WIDTH - 30, x));
+  const spawnY = Math.max(20, Math.min(BASE_HEIGHT - 60, y));
+
+  if (type === 'soda') {
+    const count = 32;
+    const drops = [];
+    for (let i = 0; i < count; i++) {
+      const offsetX = (Math.random() - 0.5) * 36;
+      const offsetY = (Math.random() - 0.5) * 36;
+      const drop = Bodies.circle(spawnX + offsetX, spawnY + offsetY, 9, {
+        restitution: 0.0,
+        friction: 0.001,
+        frictionAir: 0.01,
+        density: 0.003,
+        render: { visible: false },
+        label: 'soda'
+      });
+      drops.push(drop);
+      sodaParticles.push(drop);
+    }
+    Composite.add(engine.world, drops);
+  } else if (type === 'ice') {
+    const body = Bodies.rectangle(spawnX, spawnY, 36, 36, {
+      restitution: 0.15,
+      friction: 0.1,
+      render: { fillStyle: config.color, strokeStyle: '#90e0ef', lineWidth: 2 },
+      label: 'item'
+    });
+    Composite.add(engine.world, body);
+  } else if (type === 'icecream') {
+    const body = Bodies.circle(spawnX, spawnY, 36, {
+      restitution: 0.02,
+      friction: 0.8,
+      density: 0.004,
+      render: { fillStyle: config.color },
+      label: 'item'
+    });
+    Composite.add(engine.world, body);
+  } else if (type === 'cherry') {
+    const body = Bodies.circle(spawnX, spawnY, 14, {
+      restitution: 0.4,
+      friction: 0.2,
+      render: { fillStyle: config.color },
+      label: 'item'
+    });
+    Composite.add(engine.world, body);
+  }
+
+  score += config.score;
+  document.getElementById('score').innerText = score;
+}
+
+function setupLiquidRendering() {
+  Events.on(render, 'afterRender', () => {
+    liquidCtx.clearRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
+
+    liquidCtx.fillStyle = '#10b981';
+    for (let i = 0; i < sodaParticles.length; i++) {
+      const p = sodaParticles[i];
+      liquidCtx.beginPath();
+      liquidCtx.arc(p.position.x, p.position.y, 14, 0, Math.PI * 2);
+      liquidCtx.fill();
+    }
+  });
+}
+
+function setupCollisionCheck() {
+  Events.on(engine, 'collisionStart', (event) => {
+    event.pairs.forEach(pair => {
+      const { bodyA, bodyB } = pair;
+      if (bodyA.label === 'floor' || bodyB.label === 'floor') {
+        const item = bodyA.label === 'floor' ? bodyB : bodyA;
+        if (item.label === 'item' || item.label === 'soda') {
+          Composite.remove(engine.world, item);
+          
+          if (item.label === 'soda') {
+            const idx = sodaParticles.indexOf(item);
+            if (idx !== -1) sodaParticles.splice(idx, 1);
+          }
+          registerSpill();
+        }
+      }
+    });
+  });
+}
+
+function registerSpill() {
+  spills++;
+  document.getElementById('spill-count').innerText = spills;
+  if (spills >= MAX_SPILLS) {
+    gameOver();
+  }
+}
+
+function gameOver() {
+  isGameOver = true;
+  document.getElementById('final-score').innerText = score;
+  document.getElementById('game-over-modal').style.display = 'block';
+}
+
+function resetGame() {
+  Composite.clear(engine.world);
+  Engine.clear(engine);
+  Render.stop(render);
+  Runner.stop(runner);
+  render.canvas.remove();
+
+  sodaParticles.length = 0;
+  score = 0;
+  spills = 0;
+  isGameOver = false;
+  document.getElementById('score').innerText = 0;
+  document.getElementById('spill-count').innerText = 0;
+  document.getElementById('game-over-modal').style.display = 'none';
+
+  initPhysics();
+}
+
+function updatePaletteSelection() {
+  document.querySelectorAll('.item-btn').forEach(btn => {
+    if (btn.dataset.type === selectedType) {
+      btn.classList.add('selected');
+    } else {
+      btn.classList.remove('selected');
+    }
+  });
+}
+
+// スクリーン座標をキャンバス内部座標（450x600）へ変換
+function getCanvasCoords(clientX, clientY) {
+  const container = document.getElementById('canvas-container');
+  const rect = container.getBoundingClientRect();
+  const scale = rect.width / BASE_WIDTH;
+  return {
+    x: (clientX - rect.left) / scale,
+    y: (clientY - rect.top) / scale
+  };
+}
+
+// 具材ボタンのタップ／ドラッグ登録
+const buttons = document.querySelectorAll('.item-btn');
+let touchDraggingType = null;
+
+buttons.forEach(btn => {
+  // クリック／タップで選択状態を切り替え
+  btn.addEventListener('click', () => {
+    selectedType = btn.dataset.type;
+    updatePaletteSelection();
+  });
+
+  // PC向けドラッグ
+  btn.addEventListener('dragstart', (e) => {
+    selectedType = btn.dataset.type;
+    e.dataTransfer.setData('text/plain', btn.dataset.type);
+    updatePaletteSelection();
+  });
+
+  // スマホ向けタッチドラッグ開始
+  btn.addEventListener('touchstart', (e) => {
+    touchDraggingType = btn.dataset.type;
+    selectedType = btn.dataset.type;
+    updatePaletteSelection();
+  }, { passive: true });
+});
+
+// スマホ向けタッチドラッグ終了検知
+window.addEventListener('touchend', (e) => {
+  if (!touchDraggingType) return;
+  const touch = e.changedTouches[0];
+  const container = document.getElementById('canvas-container');
+  const rect = container.getBoundingClientRect();
+
+  if (
+    touch.clientX >= rect.left &&
+    touch.clientX <= rect.right &&
+    touch.clientY >= rect.top &&
+    touch.clientY <= rect.bottom
+  ) {
+    const coords = getCanvasCoords(touch.clientX, touch.clientY);
+    spawnItem(touchDraggingType, coords.x, coords.y);
+  }
+  touchDraggingType = null;
+});
+
+const container = document.getElementById('canvas-container');
+
+// PC向けドロップ
+container.addEventListener('dragover', (e) => e.preventDefault());
+container.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const type = e.dataTransfer.getData('text/plain') || selectedType;
+  const coords = getCanvasCoords(e.clientX, e.clientY);
+  spawnItem(type, coords.x, coords.y);
+});
+
+// タップ（クリック）で落とす
+container.addEventListener('pointerdown', (e) => {
+  // ゲームオーバーモーダルの操作時は無視
+  if (isGameOver || e.target.id === 'restart-btn') return;
+  const coords = getCanvasCoords(e.clientX, e.clientY);
+  spawnItem(selectedType, coords.x, coords.y);
+});
+
+window.onload = initPhysics;
+</script>
+</body>
+</html>
